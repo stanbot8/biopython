@@ -16,7 +16,11 @@ import unittest
 import weakref
 from collections import Counter
 
-if not (len(sys.argv) == 4 and sys.argv[1] == "_arraycore_import_probe"):
+_arraycore_import_test = len(sys.argv) == 3 and sys.argv[1].startswith(
+    "ArrayCoreImportTests.test_"
+)
+
+if not _arraycore_import_test:
     try:
         import numpy as np
     except ImportError:
@@ -123,15 +127,23 @@ def _check_failed_arraycore_import(mode, extension):
         raise AssertionError("failed import retained the invalid base object")
 
 
-if len(sys.argv) == 4 and sys.argv[1] == "_arraycore_import_probe":
-    mode = sys.argv[2]
-    if mode == "success":
-        _check_successful_arraycore_import(sys.argv[3])
-    elif mode == "retry":
-        _check_retried_arraycore_import(sys.argv[3])
-    else:
-        _check_failed_arraycore_import(mode, sys.argv[3])
-    raise SystemExit
+class ArrayCoreImportTests(unittest.TestCase):
+    def test_successful_import(self):
+        _check_successful_arraycore_import(sys.argv[2])
+
+    def test_missing_ndarray(self):
+        _check_failed_arraycore_import("missing", sys.argv[2])
+
+    def test_invalid_ndarray(self):
+        _check_failed_arraycore_import("invalid", sys.argv[2])
+
+    def test_poisoned_retry(self):
+        _check_retried_arraycore_import(sys.argv[2])
+
+
+if _arraycore_import_test:
+    unittest.main(argv=[sys.argv[0], sys.argv[1]])
+del ArrayCoreImportTests
 
 
 nucleotide_alphabet = IUPACData.unambiguous_dna_letters
@@ -142,15 +154,20 @@ class TestBasics(unittest.TestCase):
     @unittest.skipUnless(sys.implementation.name == "cpython", "requires CPython")
     def test_arraycore_import_preserves_references(self):
         extension = sys.modules["Bio.Align.substitution_matrices._arraycore"].__file__
-        for mode in ("success", "missing", "invalid", "retry"):
-            with self.subTest(mode=mode):
+        tests = (
+            "ArrayCoreImportTests.test_successful_import",
+            "ArrayCoreImportTests.test_missing_ndarray",
+            "ArrayCoreImportTests.test_invalid_ndarray",
+            "ArrayCoreImportTests.test_poisoned_retry",
+        )
+        for test in tests:
+            with self.subTest(test=test):
                 subprocess.run(
                     [
                         sys.executable,
                         "-m",
                         "Tests.test_align_substitution_matrices",
-                        "_arraycore_import_probe",
-                        mode,
+                        test,
                         extension,
                     ],
                     check=True,
