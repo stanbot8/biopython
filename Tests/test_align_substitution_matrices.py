@@ -4,30 +4,159 @@
 
 """Tests for Array in the Bio.Align.substitution_matrices module."""
 
-try:
-    import numpy as np
-except ImportError:
-    from Bio import MissingExternalDependencyError
-
-    raise MissingExternalDependencyError(
-        "Install NumPy if you want to use Bio.Align.substitution_matrices."
-    ) from None
-
-
+import gc
+import importlib.machinery
+import importlib.util
 import os
 import pickle
+import subprocess
+import sys
+import types
 import unittest
+import weakref
 from collections import Counter
 
-from Bio import SeqIO
-from Bio.Align import substitution_matrices
-from Bio.Data import IUPACData
+if not (len(sys.argv) == 4 and sys.argv[1] == "_arraycore_import_probe"):
+    try:
+        import numpy as np
+    except ImportError:
+        from Bio import MissingExternalDependencyError
+
+        raise MissingExternalDependencyError(
+            "Install NumPy if you want to use Bio.Align.substitution_matrices."
+        ) from None
+
+    from Bio import SeqIO
+    from Bio.Align import substitution_matrices
+    from Bio.Data import IUPACData
+
+
+class _InvalidArray:
+    pass
+
+
+def _load_arraycore(extension):
+    module_name = "Bio.Align.substitution_matrices._arraycore"
+    loader = importlib.machinery.ExtensionFileLoader(module_name, extension)
+    spec = importlib.util.spec_from_file_location(module_name, extension, loader=loader)
+    if spec is None:
+        raise AssertionError("could not create an arraycore import specification")
+    return importlib.util.module_from_spec(spec)
+
+
+def _check_successful_arraycore_import(extension):
+    import numpy
+
+    base_references = sys.getrefcount(numpy.ndarray)
+    module = _load_arraycore(extension)
+    reference_delta = sys.getrefcount(numpy.ndarray) - base_references
+    if reference_delta not in (0, 2):
+        raise AssertionError(
+            "successful import retained an unexpected number of "
+            f"numpy.ndarray references: {reference_delta}"
+        )
+    if module.Array.__base__ is not numpy.ndarray:
+        raise AssertionError("Array does not retain numpy.ndarray as its base")
+    del module
+    gc.collect()
+
+
+def _check_retried_arraycore_import(extension):
+    fake_numpy = types.ModuleType("numpy")
+    fake_numpy.ndarray = _InvalidArray
+    previous_numpy = sys.modules.get("numpy")
+    sys.modules["numpy"] = fake_numpy
+    try:
+        try:
+            _load_arraycore(extension)
+        except Exception:
+            pass
+        else:
+            raise AssertionError("arraycore accepted a dynamically allocated base type")
+
+        fake_numpy.ndarray = object
+        try:
+            _load_arraycore(extension)
+        except RuntimeError as exception:
+            if str(exception) != "Array type initialization previously failed":
+                raise
+        else:
+            raise AssertionError("arraycore retried a poisoned static type")
+    finally:
+        if previous_numpy is None:
+            del sys.modules["numpy"]
+        else:
+            sys.modules["numpy"] = previous_numpy
+
+
+def _check_failed_arraycore_import(mode, extension):
+    fake_numpy = types.ModuleType("numpy")
+    invalid_array = _InvalidArray() if mode == "invalid" else None
+    if invalid_array is not None:
+        fake_numpy.ndarray = invalid_array
+
+    numpy_reference = weakref.ref(fake_numpy)
+    invalid_reference = (
+        weakref.ref(invalid_array) if invalid_array is not None else None
+    )
+    previous_numpy = sys.modules.get("numpy")
+    sys.modules["numpy"] = fake_numpy
+    try:
+        try:
+            _load_arraycore(extension)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("arraycore accepted an invalid numpy.ndarray")
+    finally:
+        if previous_numpy is None:
+            del sys.modules["numpy"]
+        else:
+            sys.modules["numpy"] = previous_numpy
+
+    del fake_numpy
+    del invalid_array
+    gc.collect()
+    if numpy_reference() is not None:
+        raise AssertionError("failed import retained the NumPy module")
+    if invalid_reference is not None and invalid_reference() is not None:
+        raise AssertionError("failed import retained the invalid base object")
+
+
+if len(sys.argv) == 4 and sys.argv[1] == "_arraycore_import_probe":
+    mode = sys.argv[2]
+    if mode == "success":
+        _check_successful_arraycore_import(sys.argv[3])
+    elif mode == "retry":
+        _check_retried_arraycore_import(sys.argv[3])
+    else:
+        _check_failed_arraycore_import(mode, sys.argv[3])
+    raise SystemExit
+
 
 nucleotide_alphabet = IUPACData.unambiguous_dna_letters
 protein_alphabet = IUPACData.protein_letters
 
 
 class TestBasics(unittest.TestCase):
+    @unittest.skipUnless(sys.implementation.name == "cpython", "requires CPython")
+    def test_arraycore_import_preserves_references(self):
+        extension = sys.modules["Bio.Align.substitution_matrices._arraycore"].__file__
+        for mode in ("success", "missing", "invalid", "retry"):
+            with self.subTest(mode=mode):
+                subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "Tests.test_align_substitution_matrices",
+                        "_arraycore_import_probe",
+                        mode,
+                        extension,
+                    ],
+                    check=True,
+                    cwd=os.path.dirname(os.path.dirname(__file__)),
+                )
+
     def test_basics_vector(self):
         """Test basic vector operations."""
         counts = substitution_matrices.Array("XYZ")
